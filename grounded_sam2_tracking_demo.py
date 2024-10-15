@@ -1,3 +1,4 @@
+import argparse
 import os
 import cv2
 import torch
@@ -11,6 +12,15 @@ from utils.track_utils import sample_points_from_masks
 from utils.video_utils import create_video_from_images
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--input_dir", type=str, required=True, help="Path to the video directory")
+parser.add_argument("--output_dir", type=str, required=True, help="Output directory for tracking results")
+parser.add_argument("--text", type=str, default="objects.", help="Text prompt for grounding DINO")
+parser.add_argument("--sam2_checkpoint", type=str, default="./checkpoints/sam2.1_hiera_large.pt", help="Path to the SAM 2 checkpoint")
+
+
+args = parser.parse_args()
+
 """
 Step 1: Environment settings and model initialization
 """
@@ -23,7 +33,7 @@ if torch.cuda.get_device_properties(0).major >= 8:
     torch.backends.cudnn.allow_tf32 = True
 
 # init sam image predictor and video predictor model
-sam2_checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
+sam2_checkpoint = args.sam2_checkpoint
 model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 video_predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint)
@@ -40,11 +50,11 @@ grounding_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).
 
 # setup the input image and text prompt for SAM 2 and Grounding DINO
 # VERY important: text queries need to be lowercased + end with a dot
-text = "car."
+text = args.text.lower()
 
 # `video_dir` a directory of JPEG frames with filenames like `<frame_index>.jpg`  
 
-video_dir = "notebooks/videos/car"
+video_dir = args.input_dir
 
 # scan all the JPEG frame names in this directory
 frame_names = [
@@ -163,10 +173,14 @@ for out_frame_idx, out_obj_ids, out_mask_logits in video_predictor.propagate_in_
 Step 5: Visualize the segment results across the video and save them
 """
 
-save_dir = "./tracking_results"
+save_dir = args.output_dir
+os.makedirs(save_dir, exist_ok=True)
 
-if not os.path.exists(save_dir):
-    os.makedirs(save_dir)
+annotated_frame_dir = os.path.join(save_dir, "annotated_frames")
+os.makedirs(annotated_frame_dir, exist_ok=True)
+
+mask_dir = os.path.join(save_dir, "masks")
+os.makedirs(mask_dir, exist_ok=True)
 
 ID_TO_OBJECTS = {i: obj for i, obj in enumerate(OBJECTS, start=1)}
 for frame_idx, segments in video_segments.items():
@@ -175,7 +189,8 @@ for frame_idx, segments in video_segments.items():
     object_ids = list(segments.keys())
     masks = list(segments.values())
     masks = np.concatenate(masks, axis=0)
-    
+    object_mask = masks.any(axis=0).astype(np.uint8) * 255
+
     detections = sv.Detections(
         xyxy=sv.mask_to_xyxy(masks),  # (n, 4)
         mask=masks, # (n, h, w)
@@ -187,12 +202,15 @@ for frame_idx, segments in video_segments.items():
     annotated_frame = label_annotator.annotate(annotated_frame, detections=detections, labels=[ID_TO_OBJECTS[i] for i in object_ids])
     mask_annotator = sv.MaskAnnotator()
     annotated_frame = mask_annotator.annotate(scene=annotated_frame, detections=detections)
-    cv2.imwrite(os.path.join(save_dir, f"annotated_frame_{frame_idx:05d}.jpg"), annotated_frame)
+    cv2.imwrite(os.path.join(annotated_frame_dir, f"{frame_idx:05d}.jpg"), annotated_frame)
+    # save mask
+    cv2.imwrite(os.path.join(mask_dir, f"{frame_idx:05d}.jpg"), object_mask)
 
 
 """
 Step 6: Convert the annotated frames to video
 """
 
-output_video_path = "./children_tracking_demo_video.mp4"
-create_video_from_images(save_dir, output_video_path)
+output_video_path = "video.mp4"
+create_video_from_images(annotated_frame_dir, os.path.join(annotated_frame_dir, output_video_path))
+create_video_from_images(mask_dir, os.path.join(mask_dir, output_video_path))
